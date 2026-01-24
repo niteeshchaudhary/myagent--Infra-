@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  devops-agent:
+    build: .
+    container_name: devops-monitoring-agent
+    restart: unless-stopped
+    ports:
+      - "8080:8080"  # Webhook API
+      - "8501:8501"  # Streamlit UI
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+      - ~/.kube:/home/devops/.kube:ro  # Kubernetes config
+      - ~/.aws:/home/devops/.aws:ro    # AWS config
+      - ~/.config/gcloud:/home/devops/.config/gcloud:ro  # GCP config
+      - ~/.azure:/home/devops/.azure:ro  # Azure config
+    environment:
+      - DATABASE_TYPE=postgresql
+      - DATABASE_URL=postgresql://devops:devops123@postgres:5432/devops_agent
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - devops-network
+    command: python main.py
+
+  streamlit-ui:
+    build: .
+    container_name: devops-agent-ui
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config
+    environment:
+      - DATABASE_TYPE=postgresql
+      - DATABASE_URL=postgresql://devops:devops123@postgres:5432/devops_agent
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - devops-agent
+    networks:
+      - devops-network
+    command: streamlit run app/ui/main.py --server.address 0.0.0.0
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: devops-agent-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: devops_agent
+      POSTGRES_USER: devops
+      POSTGRES_PASSWORD: devops123
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - devops-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: devops-agent-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - devops-network
+    command: redis-server --appendonly yes
+
+  # Optional: Ollama for local LLM
+  ollama:
+    image: ollama/ollama:latest
+    container_name: devops-agent-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - devops-network
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+networks:
+  devops-network:
+    driver: bridge
