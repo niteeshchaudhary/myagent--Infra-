@@ -1,0 +1,14 @@
+venv/*
+venv/
+.env
+app/database/__pycache__/
+app/llm/__pycache__/
+app/llm/llm_service.py
+app/models/__pycache__/
+app/monitoring/__pycache__/
+app/services/__pycache__/
+app/services/auto_fix_service.py
+config/__pycache__/
+data/devops_agent.db
+data/sops/kubernetes-pod-troubleshooting.md
+logs/devops_agent.log

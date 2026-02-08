@@ -1,22 +1,19 @@
 """Database service for handling connections and operations"""
 
-from sqlalchemy import create_engine, MetaData
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.ext.declarative import declarative_base
 from contextlib import contextmanager
 from typing import Generator
 import logging
 
 from config.settings import settings
-from app.models.incident import Incident, Base as IncidentBase
-from app.models.audit_log import AuditLog, Base as AuditBase  
-from app.models.configuration import Configuration, Base as ConfigBase
-from app.models.sop_document import SOPDocument, Base as SOPBase
+from app.models import Base
+from app.models.incident import Incident
+from app.models.audit_log import AuditLog
+from app.models.configuration import Configuration
+from app.models.sop_document import SOPDocument
 
 logger = logging.getLogger(__name__)
-
-# Combine all bases into a single base
-Base = declarative_base()
 
 class DatabaseService:
     """Database service for managing connections and operations"""
@@ -64,11 +61,8 @@ class DatabaseService:
             from app.models.configuration import Configuration
             from app.models.sop_document import SOPDocument
             
-            # Create tables for each model's base
-            IncidentBase.metadata.create_all(bind=self.engine)
-            AuditBase.metadata.create_all(bind=self.engine)
-            ConfigBase.metadata.create_all(bind=self.engine)
-            SOPBase.metadata.create_all(bind=self.engine)
+            # Create all tables using the shared Base metadata
+            Base.metadata.create_all(bind=self.engine)
             
             logger.info("Database tables created successfully")
             
@@ -104,7 +98,7 @@ class DatabaseService:
         """Check database connectivity"""
         try:
             with self.get_session() as session:
-                session.execute("SELECT 1")
+                session.execute(text("SELECT 1"))
             return True
         except Exception as e:
             logger.error(f"Database health check failed: {str(e)}")
@@ -115,11 +109,8 @@ class DatabaseService:
         try:
             logger.warning("Resetting database - all data will be lost!")
             
-            # Drop all tables
-            IncidentBase.metadata.drop_all(bind=self.engine)
-            AuditBase.metadata.drop_all(bind=self.engine)
-            ConfigBase.metadata.drop_all(bind=self.engine)
-            SOPBase.metadata.drop_all(bind=self.engine)
+            # Drop all tables using the shared Base metadata
+            Base.metadata.drop_all(bind=self.engine)
             
             # Recreate all tables
             self._create_tables()

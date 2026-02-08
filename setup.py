@@ -299,8 +299,8 @@ def print_next_steps():
     
     print("\\n3. Access the application:")
     print("   - Web UI: http://localhost:8501")
-    print("   - Webhook API: http://localhost:8080")
-    print("   - API Health: http://localhost:8080/health")
+    print("   - Webhook API: http://localhost:8088")
+    print("   - API Health: http://localhost:8088/health")
     
     print("\\n4. Alternative: Use Docker Compose:")
     print("   - docker-compose up -d")

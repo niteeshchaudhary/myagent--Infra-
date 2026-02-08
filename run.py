@@ -80,7 +80,7 @@ def main():
         
         print("🌐 Starting Streamlit UI...")
         print("   UI will be available at: http://localhost:8501")
-        print("   Webhook API available at: http://localhost:8080")
+        print("   Webhook API available at: http://localhost:8088")
         
         # Start Streamlit UI in main thread
         run_streamlit_ui()

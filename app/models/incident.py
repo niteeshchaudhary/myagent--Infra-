@@ -1,13 +1,12 @@
 """Incident model for tracking infrastructure issues"""
 
 from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Enum
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 import enum
 from datetime import datetime
 from typing import Optional
 
-Base = declarative_base()
+from . import Base
 
 class IncidentStatus(enum.Enum):
     """Incident status enumeration"""

@@ -7,6 +7,7 @@ from typing import List, Optional
 import json
 import os
 import sys
+import logging
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -17,6 +18,14 @@ from app.models.incident import Incident, IncidentStatus, IncidentSeverity
 from app.models.audit_log import AuditLog, ActionType
 from app.models.configuration import Configuration
 from app.models.sop_document import SOPDocument
+
+logger = logging.getLogger(__name__)
+
+# Lazy import to avoid circular dependencies
+def get_auto_fix_service():
+    """Lazy import of AutoFixService to avoid circular dependencies"""
+    from app.services.auto_fix_service import AutoFixService
+    return AutoFixService
 
 # Page configuration
 st.set_page_config(
@@ -252,34 +261,262 @@ def show_incidents():
                 )
                 
                 if incident_id:
-                    selected_incident = next(inc for inc in incidents if inc.id == incident_id)
+                    # Refresh incident from database to get latest data
+                    selected_incident = session.query(Incident).filter(Incident.id == incident_id).first()
                     
-                    col1, col2 = st.columns(2)
+                    if not selected_incident:
+                        st.error(f"Incident {incident_id} not found")
+                        return
                     
-                    with col1:
-                        st.write(f"**Title:** {selected_incident.title}")
-                        st.write(f"**Status:** {selected_incident.status.value if selected_incident.status else 'Unknown'}")
-                        st.write(f"**Severity:** {selected_incident.severity.value if selected_incident.severity else 'Unknown'}")
-                        st.write(f"**Source:** {selected_incident.source_system or 'Unknown'}")
-                        st.write(f"**Affected Service:** {selected_incident.affected_service or 'Unknown'}")
+                    # Create tabs for different views
+                    tab1, tab2, tab3, tab4 = st.tabs(["📊 Overview", "🔧 Auto-Fix", "🤖 LLM Conversations", "📝 Activity Log"])
                     
-                    with col2:
-                        st.write(f"**Auto-Fix Attempted:** {'Yes' if selected_incident.auto_fix_attempted else 'No'}")
-                        st.write(f"**Auto-Fix Successful:** {'Yes' if selected_incident.auto_fix_successful else 'No'}")
-                        st.write(f"**Known Issue:** {'Yes' if selected_incident.is_known_issue else 'No'}")
-                        st.write(f"**Requires Approval:** {'Yes' if selected_incident.requires_approval else 'No'}")
-                        st.write(f"**Created:** {selected_incident.created_at.strftime('%Y-%m-%d %H:%M:%S') if selected_incident.created_at else 'Unknown'}")
+                    # Get LLM logs and activity logs for this incident
+                    llm_logs = session.query(AuditLog).filter(
+                        AuditLog.incident_id == incident_id,
+                        AuditLog.action_type == ActionType.LLM_QUERY
+                    ).order_by(AuditLog.created_at.desc()).all()
                     
-                    st.write(f"**Description:**")
-                    st.write(selected_incident.description)
+                    all_logs = session.query(AuditLog).filter(
+                        AuditLog.incident_id == incident_id
+                    ).order_by(AuditLog.created_at.desc()).all()
                     
-                    if selected_incident.error_message:
-                        st.write(f"**Error Message:**")
-                        st.code(selected_incident.error_message)
+                    with tab1:
+                        # Basic Information
+                        st.subheader("Basic Information")
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write(f"**Title:** {selected_incident.title}")
+                            st.write(f"**Status:** {selected_incident.status.value if selected_incident.status else 'Unknown'}")
+                            st.write(f"**Severity:** {selected_incident.severity.value if selected_incident.severity else 'Unknown'}")
+                            st.write(f"**Source:** {selected_incident.source_system or 'Unknown'}")
+                            st.write(f"**Affected Service:** {selected_incident.affected_service or 'Unknown'}")
+                            if selected_incident.namespace:
+                                st.write(f"**Namespace:** {selected_incident.namespace}")
+                        
+                        with col2:
+                            st.write(f"**Auto-Fix Attempted:** {'Yes' if selected_incident.auto_fix_attempted else 'No'}")
+                            st.write(f"**Auto-Fix Successful:** {'Yes' if selected_incident.auto_fix_successful else 'No'}")
+                            st.write(f"**Known Issue:** {'Yes' if selected_incident.is_known_issue else 'No'}")
+                            st.write(f"**Requires Approval:** {'Yes' if selected_incident.requires_approval else 'No'}")
+                            st.write(f"**Created:** {selected_incident.created_at.strftime('%Y-%m-%d %H:%M:%S') if selected_incident.created_at else 'Unknown'}")
+                            if selected_incident.updated_at:
+                                st.write(f"**Last Updated:** {selected_incident.updated_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                            if selected_incident.resolved_at:
+                                st.write(f"**Resolved:** {selected_incident.resolved_at.strftime('%Y-%m-%d %H:%M:%S')}")
+                            if selected_incident.assigned_to:
+                                st.write(f"**Assigned To:** {selected_incident.assigned_to}")
+                        
+                        st.divider()
+                        
+                        # Description
+                        st.subheader("Description")
+                        st.write(selected_incident.description)
+                        
+                        # Error Message
+                        if selected_incident.error_message:
+                            st.subheader("Error Message")
+                            st.code(selected_incident.error_message, language="text")
+                        
+                        # Stack Trace
+                        if selected_incident.stack_trace:
+                            with st.expander("Stack Trace"):
+                                st.code(selected_incident.stack_trace, language="text")
+                        
+                        # Resolution Steps
+                        if selected_incident.resolution_steps:
+                            st.subheader("Resolution Steps")
+                            st.write(selected_incident.resolution_steps)
                     
-                    if selected_incident.resolution_steps:
-                        st.write(f"**Resolution Steps:**")
-                        st.write(selected_incident.resolution_steps)
+                    with tab2:
+                        # Auto-Fix Details Section
+                        st.subheader("🔧 Auto-Fix Details")
+                        
+                        if selected_incident.auto_fix_attempted:
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.metric("Status", "✅ Successful" if selected_incident.auto_fix_successful else "❌ Failed")
+                            
+                            with col2:
+                                if selected_incident.updated_at:
+                                    st.metric("Last Attempt", selected_incident.updated_at.strftime('%Y-%m-%d %H:%M:%S'))
+                            
+                            # Show commands executed
+                            if selected_incident.auto_fix_commands:
+                                st.subheader("Commands Executed")
+                                try:
+                                    commands = json.loads(selected_incident.auto_fix_commands) if isinstance(selected_incident.auto_fix_commands, str) else selected_incident.auto_fix_commands
+                                    if isinstance(commands, list) and commands:
+                                        for i, cmd in enumerate(commands, 1):
+                                            st.code(f"{i}. {cmd}", language="bash")
+                                    else:
+                                        st.code(selected_incident.auto_fix_commands, language="bash")
+                                except:
+                                    st.code(selected_incident.auto_fix_commands, language="bash")
+                            else:
+                                st.info("No commands were executed during auto-fix")
+                            
+                            # Show resolution notes
+                            if selected_incident.resolution_notes:
+                                st.subheader("Auto-Fix Notes")
+                                st.text_area(
+                                    "Resolution Notes",
+                                    value=selected_incident.resolution_notes,
+                                    height=300,
+                                    disabled=True,
+                                    key=f"resolution_notes_{selected_incident.id}"
+                                )
+                        else:
+                            st.info("Auto-fix has not been attempted for this incident.")
+                    
+                    with tab3:
+                        # LLM Conversations
+                        st.subheader("🤖 LLM Conversations")
+                        
+                        # Show previous conversations
+                        if llm_logs:
+                            st.write("**Previous Conversations:**")
+                            for idx, log in enumerate(llm_logs, 1):
+                                with st.expander(f"Conversation #{idx} - {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}", expanded=False):
+                                    col1, col2 = st.columns([1, 1])
+                                    
+                                    with col1:
+                                        st.write("**Model Used:**")
+                                        st.code(log.llm_model_used or "Unknown", language="text")
+                                        
+                                        if log.llm_tokens_used:
+                                            st.write(f"**Tokens Used:** {log.llm_tokens_used}")
+                                        
+                                        if log.duration_ms:
+                                            st.write(f"**Response Time:** {log.duration_ms}ms")
+                                        
+                                        st.write(f"**Status:** {'✅ Success' if log.success else '❌ Failed'}")
+                                        
+                                        if log.error_message:
+                                            st.error(f"Error: {log.error_message}")
+                                    
+                                    with col2:
+                                        st.write(f"**Timestamp:** {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}")
+                                    
+                                    st.divider()
+                                    
+                                    # Prompt
+                                    if log.llm_prompt:
+                                        st.write("**📤 Prompt Sent to LLM:**")
+                                        st.text_area(
+                                            "Prompt",
+                                            value=log.llm_prompt,
+                                            height=200,
+                                            disabled=True,
+                                            key=f"prompt_{log.id}"
+                                        )
+                                    
+                                    # Response
+                                    if log.llm_response:
+                                        st.write("**📥 LLM Response:**")
+                                        st.text_area(
+                                            "Response",
+                                            value=log.llm_response,
+                                            height=300,
+                                            disabled=True,
+                                            key=f"response_{log.id}"
+                                        )
+                                    elif not log.success:
+                                        st.warning("No response received - query failed")
+                        else:
+                            st.info("No previous LLM conversations found for this incident.")
+                        
+                        st.divider()
+                        
+                        # Interactive Chat Interface
+                        st.subheader("💬 Chat with LLM")
+                        st.write("Provide additional context or instructions to help the LLM resolve this incident. After you send a message, the system will automatically retry the auto-fix with your input.")
+                        
+                        # Check if auto-fix failed
+                        if selected_incident.auto_fix_attempted and not selected_incident.auto_fix_successful:
+                            st.warning("⚠️ Auto-fix previously failed. You can provide additional context to help retry the fix.")
+                        
+                        # Chat input
+                        user_message = st.text_area(
+                            "Your Message",
+                            height=150,
+                            placeholder="E.g., 'The cluster was recently updated. Check if the API server is accessible.' or 'Try checking the network connectivity first.'",
+                            key=f"user_chat_input_{incident_id}"
+                        )
+                        
+                        col1, col2 = st.columns([1, 4])
+                        with col1:
+                            send_button = st.button("📤 Send & Retry Auto-Fix", type="primary", key=f"send_chat_{incident_id}")
+                        
+                        if send_button:
+                            if user_message.strip():
+                                with st.spinner("Sending message to LLM and retrying auto-fix..."):
+                                    try:
+                                        AutoFixService = get_auto_fix_service()
+                                        auto_fix_service = AutoFixService()
+                                        
+                                        # Retry auto-fix with user input
+                                        success = auto_fix_service.attempt_auto_fix(
+                                            selected_incident,
+                                            force_retry=True,
+                                            user_input=user_message.strip()
+                                        )
+                                        
+                                        if success:
+                                            st.success("✅ Auto-fix retry successful! The incident has been resolved.")
+                                            st.balloons()
+                                            st.rerun()
+                                        else:
+                                            st.warning("⚠️ Auto-fix retry completed, but the issue may still need attention. Check the updated resolution notes.")
+                                            st.info("💡 You can send another message with more context to try again.")
+                                            st.rerun()
+                                    
+                                    except Exception as e:
+                                        st.error(f"❌ Error: {str(e)}")
+                                        logger.error(f"Error in chat retry: {str(e)}")
+                            else:
+                                st.warning("Please enter a message before sending.")
+                    
+                    with tab4:
+                        # Activity Log
+                        st.subheader("📝 Activity Log")
+                        
+                        if all_logs:
+                            for log in all_logs:
+                                with st.expander(f"{log.action_type.value.replace('_', ' ').title()} - {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}"):
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        st.write(f"**Action:** {log.action_type.value}")
+                                        st.write(f"**User:** {log.user_id or 'System'}")
+                                        st.write(f"**Status:** {'✅ Success' if log.success else '❌ Failed'}")
+                                    
+                                    with col2:
+                                        st.write(f"**Timestamp:** {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}")
+                                        if log.duration_ms:
+                                            st.write(f"**Duration:** {log.duration_ms}ms")
+                                    
+                                    st.write(f"**Description:** {log.action_description}")
+                                    
+                                    if log.command_executed:
+                                        st.write("**Command Executed:**")
+                                        st.code(log.command_executed, language="bash")
+                                        
+                                        if log.command_output:
+                                            with st.expander("Command Output"):
+                                                st.code(log.command_output[:5000], language="text")  # Limit to 5000 chars
+                                        
+                                        if log.command_exit_code is not None:
+                                            st.write(f"**Exit Code:** {log.command_exit_code}")
+                                    
+                                    if log.error_message:
+                                        st.error(f"**Error:** {log.error_message}")
+                                    
+                                    if log.llm_model_used:
+                                        st.write(f"**LLM Model:** {log.llm_model_used}")
+                        else:
+                            st.info("No activity logs found for this incident.")
                         
             else:
                 st.info("No incidents match the current filters")
@@ -428,7 +665,7 @@ def show_monitoring_status():
             "Polling Interval (seconds)", 
             min_value=30, 
             max_value=3600, 
-            value=300
+            value=settings.POLLING_INTERVAL
         )
         
         if st.button("Start Polling"):
@@ -441,7 +678,7 @@ def show_monitoring_status():
             "Webhook Port",
             min_value=1000,
             max_value=65535,
-            value=8080
+            value=8088
         )
         
         if st.button("Start Webhook Server"):

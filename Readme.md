@@ -108,8 +108,8 @@ streamlit run app/ui/main.py
 ### 4. Access the Application
 
 - **Web UI**: http://localhost:8501
-- **Webhook API**: http://localhost:8080
-- **Health Check**: http://localhost:8080/health
+- **Webhook API**: http://localhost:8088
+- **Health Check**: http://localhost:8088/health
 
 ## 🐳 Docker Deployment
 
@@ -135,7 +135,7 @@ docker build -t devops-agent .
 # Run container
 docker run -d \
   --name devops-agent \
-  -p 8080:8080 \
+  -p 8088:8088 \
   -p 8501:8501 \
   -v $(pwd)/data:/app/data \
   -v ~/.kube:/home/devops/.kube:ro \
@@ -160,7 +160,7 @@ GROQ_API_KEY=your_key
 
 # Monitoring
 POLLING_INTERVAL=300  # seconds
-WEBHOOK_PORT=8080
+WEBHOOK_PORT=8088
 
 # Cloud Providers
 AWS_PROFILE=your_profile

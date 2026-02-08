@@ -1,13 +1,12 @@
 """Audit log model for tracking all system actions"""
 
 from sqlalchemy import Column, Integer, String, DateTime, Text, Boolean, Enum, ForeignKey
-from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import enum
 from datetime import datetime
 
-Base = declarative_base()
+from . import Base
 
 class ActionType(enum.Enum):
     """Types of actions that can be logged"""

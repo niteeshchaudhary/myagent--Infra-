@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Monitoring settings
     POLLING_INTERVAL: int = 300  # seconds
     MAX_RETRIES: int = 3
-    WEBHOOK_PORT: int = 8080
+    WEBHOOK_PORT: int = 8088
     WEBHOOK_SECRET: Optional[str] = None
     
     # Kubernetes settings
@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         "kubectl get pods",
         "kubectl get services",
         "kubectl get nodes",
+        "kubectl config view",
+        "kubectl cluster-info",
+        "kubectl describe",
+        "kubectl logs",
         "aws ec2 describe-instances",
         "gcloud compute instances list",
         "az vm list"

@@ -16,6 +16,7 @@ from config.settings import settings
 from app.models.incident import Incident, IncidentStatus, IncidentSeverity
 from app.models.audit_log import AuditLog, ActionType
 from app.database.database import db_service
+from app.services.auto_fix_service import AutoFixService
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ class WebhookMonitor:
         self.app = Flask(__name__)
         self.server = None
         self.is_running = False
+        self.auto_fix_service = AutoFixService()
         
         # Setup routes
         self._setup_routes()
@@ -341,6 +343,13 @@ class WebhookMonitor:
                 logger.info(f"Created incident from webhook: {incident.id} - {incident.title}")
                 self._log_action(f"Created incident from webhook: {incident.title}", ActionType.INCIDENT_CREATED)
                 
+                # Attempt auto-fix for the newly created incident
+                try:
+                    logger.info(f"Attempting auto-fix for incident {incident.id}")
+                    self.auto_fix_service.attempt_auto_fix(incident)
+                except Exception as e:
+                    logger.error(f"Error during auto-fix attempt: {str(e)}")
+                
                 return incident
                 
         except Exception as e:
@@ -386,18 +395,63 @@ class WebhookMonitor:
             logger.warning("Webhook monitor is already running")
             return
         
-        try:
-            self.server = make_server('0.0.0.0', self.port, self.app, threaded=True)
-            self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
-            self.server_thread.start()
-            self.is_running = True
-            
-            logger.info(f"Webhook monitor started on port {self.port}")
-            self._log_action("Webhook monitor started", ActionType.MONITORING_CHECK)
-            
-        except Exception as e:
-            logger.error(f"Failed to start webhook monitor: {str(e)}")
-            raise
+        original_port = self.port
+        
+        # Try to find an available port if the configured port is in use
+        for attempt in range(10):  # Try up to 10 alternative ports
+            try:
+                # Try to create the server - this will fail if port is in use
+                # Note: werkzeug catches OSError and calls sys.exit(1), so we catch SystemExit
+                self.server = make_server('0.0.0.0', self.port, self.app, threaded=True)
+                self.server_thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+                self.server_thread.start()
+                self.is_running = True
+                
+                if self.port != original_port:
+                    logger.warning(f"Port {original_port} was in use, using port {self.port} instead")
+                else:
+                    logger.info(f"Webhook monitor started on port {self.port}")
+                
+                self._log_action("Webhook monitor started", ActionType.MONITORING_CHECK)
+                return
+                
+            except (OSError, SystemExit) as e:
+                # werkzeug catches OSError and raises SystemExit(1), so we catch both
+                error_str = str(e).lower() if hasattr(e, '__str__') else ''
+                errno = getattr(e, 'errno', None)
+                
+                # Check if it's a port in use error
+                is_port_in_use = (
+                    "address already in use" in error_str or 
+                    errno == 98 or  # Linux: Address already in use
+                    errno == 48 or  # macOS: Address already in use
+                    isinstance(e, SystemExit)  # werkzeug calls sys.exit(1) on port conflict
+                )
+                
+                if is_port_in_use:
+                    # Port is in use, try next one
+                    if attempt == 0:
+                        logger.warning(f"Port {self.port} is already in use, trying alternative ports...")
+                    self.port += 1
+                    continue
+                else:
+                    # Different error, re-raise it (but convert SystemExit to RuntimeError)
+                    if isinstance(e, SystemExit):
+                        raise RuntimeError(f"Failed to start webhook monitor on port {self.port}: {error_str}")
+                    raise
+            except Exception as e:
+                if attempt == 0:
+                    # First attempt failed, try alternative ports
+                    logger.warning(f"Failed to start on port {self.port}: {str(e)}, trying alternative ports...")
+                    self.port += 1
+                    continue
+                else:
+                    raise
+        
+        # If we get here, we couldn't find an available port
+        error_msg = f"Failed to start webhook monitor: Could not find an available port (tried {original_port} to {self.port})"
+        logger.error(error_msg)
+        raise RuntimeError(error_msg)
     
     def stop(self):
         """Stop the webhook server"""

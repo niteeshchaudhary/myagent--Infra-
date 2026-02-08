@@ -14,6 +14,7 @@ from app.monitoring.command_executor import CommandExecutor, CommandResult
 from app.models.incident import Incident, IncidentStatus, IncidentSeverity
 from app.models.audit_log import AuditLog, ActionType
 from app.database.database import db_service
+from app.services.auto_fix_service import AutoFixService
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class PollingMonitor:
     
     def __init__(self):
         self.command_executor = CommandExecutor()
+        self.auto_fix_service = AutoFixService()
         self.is_running = False
         self.monitor_thread = None
         self.checks: List[MonitoringCheck] = []
@@ -450,6 +452,13 @@ class PollingMonitor:
                 
                 if existing_incident:
                     logger.info(f"Similar incident already exists: {existing_incident.id}")
+                    # Attempt auto-fix if not already attempted
+                    if not existing_incident.auto_fix_attempted:
+                        try:
+                            logger.info(f"Attempting auto-fix for existing incident {existing_incident.id}")
+                            self.auto_fix_service.attempt_auto_fix(existing_incident)
+                        except Exception as e:
+                            logger.error(f"Error during auto-fix attempt for existing incident: {str(e)}")
                     return
                 
                 incident = Incident(
@@ -469,6 +478,13 @@ class PollingMonitor:
                 
                 logger.info(f"Created incident: {incident.id} - {title}")
                 self._log_action(f"Created incident: {title}", ActionType.INCIDENT_CREATED)
+                
+                # Attempt auto-fix for the newly created incident
+                try:
+                    logger.info(f"Attempting auto-fix for incident {incident.id}")
+                    self.auto_fix_service.attempt_auto_fix(incident)
+                except Exception as e:
+                    logger.error(f"Error during auto-fix attempt: {str(e)}")
                 
         except Exception as e:
             logger.error(f"Failed to create incident: {str(e)}")
