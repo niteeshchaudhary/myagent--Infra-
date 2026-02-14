@@ -1,5 +1,5 @@
-"""LLM integration package"""
+"""LLM integration module"""
 
-from .llm_service import LLMService
+from .llm_service import llm_service, LLMService
 
-__all__ = ['LLMService']
+__all__ = ['llm_service', 'LLMService']
