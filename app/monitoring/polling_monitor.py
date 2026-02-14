@@ -18,6 +18,9 @@ from app.services.auto_fix_service import AutoFixService
 
 logger = logging.getLogger(__name__)
 
+# How often to re-check open incidents to see if the issue still exists (seconds)
+OPEN_INCIDENT_RECHECK_INTERVAL = 60
+
 @dataclass
 class MonitoringCheck:
     """Configuration for a monitoring check"""
@@ -38,7 +41,8 @@ class PollingMonitor:
         self.monitor_thread = None
         self.checks: List[MonitoringCheck] = []
         self.last_check_times: Dict[str, datetime] = {}
-        
+        self.last_open_incident_recheck: Optional[datetime] = None
+
         # Initialize default monitoring checks
         self._initialize_checks()
     
@@ -148,6 +152,15 @@ class PollingMonitor:
                         
                         self._run_check(check)
                         self.last_check_times[check.name] = current_time
+                
+                # Re-check open incidents every minute: if issue no longer exists, mark resolved
+                if (self.last_open_incident_recheck is None or
+                    (current_time - self.last_open_incident_recheck).total_seconds() >= OPEN_INCIDENT_RECHECK_INTERVAL):
+                    try:
+                        self._recheck_open_incidents()
+                        self.last_open_incident_recheck = current_time
+                    except Exception as e:
+                        logger.error(f"Error rechecking open incidents: {str(e)}")
                 
                 # Sleep for a short interval before next iteration
                 time.sleep(30)  # Check every 30 seconds
@@ -501,8 +514,129 @@ class PollingMonitor:
             return 'azure'
         else:
             return 'unknown'
-    
-    def _log_action(self, description: str, action_type: ActionType):
+
+    def _recheck_open_incidents(self):
+        """Re-check all open incidents every minute; mark resolved if the issue no longer exists."""
+        try:
+            with db_service.get_session() as session:
+                open_incidents = session.query(Incident).filter(
+                    Incident.status.in_([IncidentStatus.OPEN, IncidentStatus.IN_PROGRESS])
+                ).all()
+                if not open_incidents:
+                    return
+                for incident in open_incidents:
+                    try:
+                        if not self._issue_still_exists(incident):
+                            incident.status = IncidentStatus.RESOLVED
+                            incident.resolved_at = datetime.now()
+                            session.commit()
+                            logger.info(f"Incident {incident.id} marked resolved (issue no longer exists): {incident.title}")
+                            self._log_action(
+                                f"Incident {incident.id} auto-resolved: issue no longer detected",
+                                ActionType.INCIDENT_RESOLVED,
+                                incident.id
+                            )
+                    except Exception as e:
+                        logger.warning(f"Error rechecking incident {incident.id}: {str(e)}")
+        except Exception as e:
+            logger.error(f"Failed to recheck open incidents: {str(e)}")
+            raise
+
+    def _issue_still_exists(self, incident: Incident) -> bool:
+        """
+        Return True if the underlying issue for this incident still exists, False if it is gone.
+        Used to auto-resolve when the condition that created the incident has cleared.
+        """
+        title = (incident.title or "").strip()
+        source_system = (incident.source_system or "").lower()
+        affected = (incident.affected_service or "").strip()
+        namespace = (incident.namespace or "default").strip()
+
+        # Monitoring command failed: re-run the same command; if it succeeds, issue is gone
+        if title.startswith("Monitoring command failed:"):
+            check_name = title.replace("Monitoring command failed:", "").strip()
+            for check in self.checks:
+                if check.name == check_name and check.enabled:
+                    result = self.command_executor.execute_command(check.command)
+                    return not result.success
+            return True  # Unknown check or disabled: assume still exists
+
+        # Kubernetes: re-run the relevant check and see if this resource still appears in issues
+        if source_system == "kubernetes":
+            if "pod" in title.lower() and affected:
+                # Re-run full pods check; if this pod still appears in issues list, it's still open
+                result = self.command_executor.execute_command("kubectl get pods --all-namespaces -o json")
+                if not result.success:
+                    return True  # Can't verify, assume still exists
+                issues = self._check_kubernetes_pods(result)
+                for issue in issues:
+                    if issue.get("pod_name") == affected and issue.get("namespace") == namespace:
+                        return True  # Same pod still has an issue
+                return False  # No issue found for this pod
+            if "node" in title.lower() and affected:
+                result = self.command_executor.execute_command("kubectl get nodes -o json")
+                if not result.success:
+                    return True
+                issues = self._check_kubernetes_nodes(result)
+                for issue in issues:
+                    if issue.get("node_name") == affected:
+                        return True
+                return False
+            if "service" in title.lower() or "loadbalancer" in title.lower():
+                result = self.command_executor.execute_command("kubectl get services --all-namespaces -o json")
+                if not result.success:
+                    return True
+                issues = self._check_kubernetes_services(result)
+                for issue in issues:
+                    if issue.get("service_name") == affected and issue.get("namespace") == namespace:
+                        return True
+                return False
+            # Generic k8s: assume still exists if we can't recheck
+            return True
+
+        # AWS EC2
+        if source_system == "aws" and affected:
+            cmd = f"aws ec2 describe-instances --instance-ids {affected} --output json"
+            if getattr(settings, "AWS_PROFILE", None):
+                cmd = f"aws ec2 describe-instances --instance-ids {affected} --profile {settings.AWS_PROFILE} --output json"
+            result = self.command_executor.execute_command(cmd)
+            if not result.success:
+                return False  # Instance not found or command error - treat as resolved
+            try:
+                data = json.loads(result.stdout)
+                instances = data.get("Reservations", [])
+                for res in instances:
+                    for inst in res.get("Instances", []):
+                        if inst.get("InstanceId") == affected:
+                            state = inst.get("State", {}).get("Name", "")
+                            return state not in ("running",)
+                return False
+            except (json.JSONDecodeError, KeyError):
+                return True
+
+        # GCP
+        if source_system == "gcp" and affected:
+            if getattr(settings, "GCP_PROJECT", None):
+                result = self.command_executor.execute_command(
+                    f"gcloud compute instances describe {affected} --project={settings.GCP_PROJECT} --format=json"
+                )
+            else:
+                result = self.command_executor.execute_command(
+                    f"gcloud compute instances describe {affected} --format=json"
+                )
+            if not result.success:
+                return False
+            try:
+                data = json.loads(result.stdout)
+                status = data.get("status", "")
+                return status != "RUNNING"
+            except (json.JSONDecodeError, KeyError):
+                return True
+
+        # Webhook / unknown: do not auto-resolve
+        return True
+
+    def _log_action(self, description: str, action_type: ActionType, incident_id: Optional[int] = None):
         """Log action to audit log"""
         try:
             with db_service.get_session() as session:
@@ -511,7 +645,8 @@ class PollingMonitor:
                     action_description=description,
                     success=True,
                     user_id="polling_monitor",
-                    source_system="monitoring"
+                    source_system="monitoring",
+                    incident_id=incident_id
                 )
                 session.add(audit_log)
                 session.commit()

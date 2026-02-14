@@ -32,22 +32,35 @@ class CommandExecutor:
     """Executes infrastructure monitoring commands safely"""
     
     def __init__(self):
-        self.allowed_commands = settings.ALLOWED_COMMANDS
-        self.max_execution_time = 300  # 5 minutes
+        self.max_execution_time = 300  # 5 minutes default
+        # Shorter timeouts for commands that can hang
+        self.command_timeouts = {
+            'kubectl cluster-info': 30,  # 30 seconds for cluster-info
+            'kubectl get': 20,  # 20 seconds for get commands
+            'kubectl describe': 30,  # 30 seconds for describe
+            'kubectl logs': 20,  # 20 seconds for logs
+            'kubectl': 30,  # 30 seconds default for all kubectl commands
+        }
         
     def is_command_allowed(self, command: str) -> bool:
-        """Check if command is in allowed list"""
-        cmd_parts = command.strip().split()
-        if not cmd_parts:
-            return False
-            
-        # Check against allowed commands
-        for allowed_cmd in self.allowed_commands:
-            allowed_parts = allowed_cmd.split()
-            if len(cmd_parts) >= len(allowed_parts):
-                if cmd_parts[:len(allowed_parts)] == allowed_parts:
-                    return True
-        return False
+        """Check if command is allowed using command list manager (checks both allowed and not-allowed lists)"""
+        # Lazy import to avoid circular dependencies
+        from app.services.command_list_manager import command_list_manager
+        return command_list_manager.is_command_allowed(command)
+    
+    def _get_command_timeout(self, command: str, timeout: Optional[int] = None) -> int:
+        """Get appropriate timeout for a command"""
+        if timeout is not None:
+            return timeout
+        
+        # Check for specific command timeouts
+        command_lower = command.lower().strip()
+        for cmd_pattern, cmd_timeout in self.command_timeouts.items():
+            if command_lower.startswith(cmd_pattern.lower()):
+                return cmd_timeout
+        
+        # Default timeout
+        return self.max_execution_time
     
     def execute_command(
         self, 
@@ -55,7 +68,7 @@ class CommandExecutor:
         timeout: Optional[int] = None,
         log_execution: bool = True
     ) -> CommandResult:
-        """Execute a command safely with logging"""
+        """Execute a command safely with logging and timeout handling"""
         start_time = time.time()
         timestamp = datetime.now()
         
@@ -74,6 +87,10 @@ class CommandExecutor:
                 self._log_execution(result)
             return result
         
+        # Get appropriate timeout for this command
+        cmd_timeout = self._get_command_timeout(command, timeout)
+        logger.debug(f"Executing command '{command}' with timeout {cmd_timeout}s")
+        
         try:
             # Use shell=True on Windows for kubectl, aws, gcloud, az commands
             shell = os.name == 'nt'
@@ -82,7 +99,7 @@ class CommandExecutor:
                 command if shell else shlex.split(command),
                 capture_output=True,
                 text=True,
-                timeout=timeout or self.max_execution_time,
+                timeout=cmd_timeout,
                 shell=shell,
                 env=os.environ.copy()
             )
@@ -105,36 +122,62 @@ class CommandExecutor:
             logger.info(f"Command executed: {command} (exit_code: {process.returncode}, duration: {duration_ms}ms)")
             return result
             
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            # Capture any partial output if available
+            partial_stdout = ""
+            partial_stderr = ""
+            
+            if hasattr(e, 'stdout') and e.stdout:
+                try:
+                    partial_stdout = e.stdout.decode('utf-8', errors='ignore')
+                except (AttributeError, UnicodeDecodeError):
+                    partial_stdout = str(e.stdout)[:500] if e.stdout else ""
+            
+            if hasattr(e, 'stderr') and e.stderr:
+                try:
+                    partial_stderr = e.stderr.decode('utf-8', errors='ignore')
+                except (AttributeError, UnicodeDecodeError):
+                    partial_stderr = str(e.stderr)[:500] if e.stderr else ""
+            
+            timeout_error_msg = (
+                f"Command timed out after {cmd_timeout} seconds. "
+                f"This usually indicates a network connectivity issue or the target service is unreachable. "
+                f"Common causes: network timeout, unreachable endpoint, firewall blocking, DNS issues."
+            )
+            
+            if partial_stderr:
+                timeout_error_msg += f"\nPartial error output before timeout: {partial_stderr}"
+            
             result = CommandResult(
                 command=command,
                 exit_code=-2,
-                stdout="",
-                stderr=f"Command timed out after {timeout or self.max_execution_time} seconds",
+                stdout=partial_stdout,
+                stderr=timeout_error_msg,
                 duration_ms=duration_ms,
                 timestamp=timestamp,
                 success=False
             )
             if log_execution:
                 self._log_execution(result)
-            logger.error(f"Command timed out: {command}")
+            logger.warning(f"Command timed out after {cmd_timeout}s: {command}")
             return result
             
         except Exception as e:
             duration_ms = int((time.time() - start_time) * 1000)
+            error_msg = f"Command execution error: {str(e)}"
             result = CommandResult(
                 command=command,
                 exit_code=-3,
                 stdout="",
-                stderr=str(e),
+                stderr=error_msg,
                 duration_ms=duration_ms,
                 timestamp=timestamp,
                 success=False
             )
             if log_execution:
                 self._log_execution(result)
-            logger.error(f"Command execution error: {command} - {str(e)}")
+            logger.error(f"Command execution error: {command} - {error_msg}")
             return result
     
     def _log_execution(self, result: CommandResult):

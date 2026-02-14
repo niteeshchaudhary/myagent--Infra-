@@ -25,6 +25,25 @@ class Settings(BaseSettings):
     REDIS_DB: int = 0
     REDIS_PASSWORD: Optional[str] = None
     
+    # Queue Broker settings
+    QUEUE_BROKER_TYPE: str = "internal"  # internal, redis, celery, rabbitmq, kafka
+    QUEUE_BROKER_URL: Optional[str] = None  # For Celery: redis://localhost:6379/0
+    QUEUE_NAME: str = "command_queue"
+    
+    # RabbitMQ settings
+    RABBITMQ_HOST: str = "localhost"
+    RABBITMQ_PORT: int = 5672
+    RABBITMQ_USERNAME: str = "guest"
+    RABBITMQ_PASSWORD: str = "guest"
+    
+    # Kafka settings
+    KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
+    KAFKA_GROUP_ID: str = "devops_agent"
+    
+    # Queue persistence settings
+    QUEUE_PERSISTENCE_ENABLED: bool = True
+    QUEUE_PERSISTENCE_PATH: str = "data/queue_state.json"
+    
     # LLM Configuration
     LLM_PROVIDER: str = "ollama"  # ollama, openai, groq
     OPENAI_API_KEY: Optional[str] = None
@@ -78,6 +97,14 @@ class Settings(BaseSettings):
         "aws ec2 describe-instances",
         "gcloud compute instances list",
         "az vm list"
+    ]
+    NOT_ALLOWED_COMMANDS: List[str] = [
+        "kubectl delete",
+        "kubectl apply",
+        "kubectl create",
+        "rm -rf",
+        "format",
+        "dd if="
     ]
     
     # Logging

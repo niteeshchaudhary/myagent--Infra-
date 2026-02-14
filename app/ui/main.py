@@ -3,11 +3,12 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict
 import json
 import os
 import sys
 import logging
+import time
 
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -18,6 +19,7 @@ from app.models.incident import Incident, IncidentStatus, IncidentSeverity
 from app.models.audit_log import AuditLog, ActionType
 from app.models.configuration import Configuration
 from app.models.sop_document import SOPDocument
+from app.services.command_list_manager import command_list_manager
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,14 @@ st.markdown("""
 def main():
     """Main application entry point"""
     
+    # Initialize session state for auto-refresh
+    if 'auto_refresh_enabled' not in st.session_state:
+        st.session_state.auto_refresh_enabled = True
+    if 'refresh_interval' not in st.session_state:
+        st.session_state.refresh_interval = 5  # Default 5 seconds
+    if 'last_refresh_time' not in st.session_state:
+        st.session_state.last_refresh_time = time.time()
+    
     # Header
     st.markdown("""
     <div class="main-header">
@@ -81,10 +91,56 @@ def main():
     
     # Sidebar navigation
     st.sidebar.title("Navigation")
-    page = st.sidebar.selectbox(
+    page = st.sidebar.radio(
         "Select Page",
-        ["Dashboard", "Incidents", "Audit Logs", "SOP Documents", "Configuration", "Monitoring Status"]
+        ["Dashboard", "Incidents", "Audit Logs", "SOP Documents", "Configuration", "Monitoring Status", "Chat with Agent"]
     )
+    
+    # Auto-refresh controls in sidebar
+    st.sidebar.divider()
+    st.sidebar.subheader("Auto-Refresh")
+    auto_refresh = st.sidebar.checkbox(
+        "Enable Auto-Refresh",
+        value=st.session_state.auto_refresh_enabled,
+        key="auto_refresh_checkbox"
+    )
+    st.session_state.auto_refresh_enabled = auto_refresh
+    
+    if auto_refresh:
+        refresh_interval = st.sidebar.slider(
+            "Refresh Interval (seconds)",
+            min_value=2,
+            max_value=60,
+            value=st.session_state.refresh_interval,
+            step=1,
+            key="refresh_interval_slider"
+        )
+        st.session_state.refresh_interval = refresh_interval
+        
+        # Add JavaScript auto-refresh using page reload
+        # This is the most reliable method for Streamlit
+        refresh_js = f"""
+        <script>
+            (function() {{
+                let refreshTimer = setTimeout(function() {{
+                    window.location.reload();
+                }}, {refresh_interval * 1000});
+                
+                // Clear timer if user navigates away or disables auto-refresh
+                window.addEventListener('beforeunload', function() {{
+                    clearTimeout(refreshTimer);
+                }});
+            }})();
+        </script>
+        """
+        st.markdown(refresh_js, unsafe_allow_html=True)
+        
+        # Show next refresh time
+        st.sidebar.caption(f"🔄 Auto-refreshing every {refresh_interval}s")
+    
+    # Manual refresh button
+    if st.sidebar.button("🔄 Refresh Now", use_container_width=True):
+        st.rerun()
     
     # Route to appropriate page
     if page == "Dashboard":
@@ -99,6 +155,8 @@ def main():
         show_configuration()
     elif page == "Monitoring Status":
         show_monitoring_status()
+    elif page == "Chat with Agent":
+        show_chat_with_agent()
 
 def show_dashboard():
     """Display main dashboard with key metrics"""
@@ -275,7 +333,7 @@ def show_incidents():
                     llm_logs = session.query(AuditLog).filter(
                         AuditLog.incident_id == incident_id,
                         AuditLog.action_type == ActionType.LLM_QUERY
-                    ).order_by(AuditLog.created_at.desc()).all()
+                    ).order_by(AuditLog.created_at.asc()).all()  # Show oldest first (chronological order)
                     
                     all_logs = session.query(AuditLog).filter(
                         AuditLog.incident_id == incident_id
@@ -330,6 +388,56 @@ def show_incidents():
                             st.write(selected_incident.resolution_steps)
                     
                     with tab2:
+                        # Approval Request Section (if pending)
+                        if selected_incident.approval_requested and not selected_incident.approval_granted:
+                            st.subheader("🔐 Approval Request Pending")
+                            st.warning("⚠️ Commands require approval before execution")
+                            
+                            # Parse approval notes to get commands
+                            approval_commands = []
+                            if selected_incident.approval_notes:
+                                try:
+                                    import json
+                                    notes_data = json.loads(selected_incident.approval_notes)
+                                    approval_commands = notes_data.get('commands', [])
+                                    reason = notes_data.get('reason', 'Commands not in allowed list')
+                                    
+                                    st.write(f"**Reason:** {reason}")
+                                    st.write(f"**Commands Requested:** ({len(approval_commands)} command(s))")
+                                    for i, cmd in enumerate(approval_commands, 1):
+                                        st.code(cmd, language="bash")
+                                    
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        if st.button("✅ Approve Commands", type="primary", key=f"approve_{incident_id}"):
+                                            try:
+                                                from app.approval_system.approval_request import ApprovalRequestService
+                                                approval_service = ApprovalRequestService()
+                                                if approval_service.grant_approval(incident_id, "ui_user", "Approved via UI"):
+                                                    st.success("✅ Approval granted! Commands will be executed.")
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Failed to grant approval")
+                                            except Exception as e:
+                                                st.error(f"Error: {str(e)}")
+                                    
+                                    with col2:
+                                        if st.button("❌ Reject Commands", key=f"reject_{incident_id}"):
+                                            try:
+                                                from app.approval_system.approval_request import ApprovalRequestService
+                                                approval_service = ApprovalRequestService()
+                                                if approval_service.reject_approval(incident_id, "ui_user", "Rejected via UI"):
+                                                    st.info("❌ Approval rejected. Agent will continue without these commands.")
+                                                    st.rerun()
+                                                else:
+                                                    st.error("Failed to reject approval")
+                                            except Exception as e:
+                                                st.error(f"Error: {str(e)}")
+                                    
+                                    st.divider()
+                                except:
+                                    st.write("**Commands:** Unable to parse approval details")
+                        
                         # Auto-Fix Details Section
                         st.subheader("🔧 Auto-Fix Details")
                         
@@ -374,11 +482,13 @@ def show_incidents():
                         # LLM Conversations
                         st.subheader("🤖 LLM Conversations")
                         
-                        # Show previous conversations
+                        # Show previous conversations (in chronological order: first conversation = #1)
                         if llm_logs:
                             st.write("**Previous Conversations:**")
+                            total_conversations = len(llm_logs)
                             for idx, log in enumerate(llm_logs, 1):
-                                with st.expander(f"Conversation #{idx} - {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}", expanded=False):
+                                conversation_num = idx  # First conversation is #1, last is #N
+                                with st.expander(f"Conversation #{conversation_num} (of {total_conversations}) - {log.created_at.strftime('%Y-%m-%d %H:%M:%S') if log.created_at else 'Unknown'}", expanded=False):
                                     col1, col2 = st.columns([1, 1])
                                     
                                     with col1:
@@ -453,7 +563,8 @@ def show_incidents():
                             if user_message.strip():
                                 with st.spinner("Sending message to LLM and retrying auto-fix..."):
                                     try:
-                                        AutoFixService = get_auto_fix_service()
+                                        # Import inside try block to avoid circular import issues
+                                        from app.services.auto_fix_service import AutoFixService
                                         auto_fix_service = AutoFixService()
                                         
                                         # Retry auto-fix with user input
@@ -630,8 +741,6 @@ def show_configuration():
     """Display configuration management page"""
     st.header("⚙️ Configuration")
     
-    st.info("Configuration management interface - settings can be modified here")
-    
     # System status
     st.subheader("🔍 System Status")
     
@@ -650,6 +759,184 @@ def show_configuration():
     
     with col3:
         st.metric("LLM Service", "Available", delta="✅")
+    
+    st.divider()
+    
+    # Command Lists Management
+    st.subheader("🔐 Command Lists Management")
+    st.info("Manage allowed and not-allowed command lists. Commands in the not-allowed list take precedence over the allowed list.")
+    
+    # Create tabs for allowed and not-allowed lists
+    tab1, tab2 = st.tabs(["✅ Allowed Commands", "❌ Not-Allowed Commands"])
+    
+    with tab1:
+        st.write("**Allowed Commands List**")
+        st.caption("Commands that are permitted to execute. Commands must start with one of these patterns.")
+        st.info("💡 **Tip:** Use `*` at the end of a pattern to match any suffix. Example: `kubectl config use-context*` matches `kubectl config use-context kind-kind` or any cluster name.")
+        
+        # Get current allowed commands
+        allowed_commands = command_list_manager.get_allowed_commands()
+        
+        # Display current commands
+        if allowed_commands:
+            st.write(f"**Current Allowed Commands ({len(allowed_commands)}):**")
+            for i, cmd in enumerate(allowed_commands, 1):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.code(cmd, language="bash")
+                with col2:
+                    if st.button("🗑️", key=f"remove_allowed_{i}", help="Remove this command"):
+                        if command_list_manager.remove_allowed_command(cmd):
+                            st.success(f"Removed: {cmd}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to remove command")
+        else:
+            st.info("No allowed commands configured")
+        
+        st.divider()
+        
+        # Add new allowed command
+        st.write("**Add New Allowed Command**")
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            new_allowed = st.text_input(
+                "Command Pattern",
+                placeholder="e.g., kubectl config use-context*",
+                key="new_allowed_command",
+                help="Enter a command pattern. Use * at the end for wildcard matching (e.g., 'kubectl config use-context*' matches any cluster name)"
+            )
+        with col2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("➕ Add", key="add_allowed_btn", type="primary"):
+                if new_allowed.strip():
+                    if command_list_manager.add_allowed_command(new_allowed):
+                        st.success(f"Added: {new_allowed}")
+                        st.rerun()
+                    else:
+                        st.warning("Command already exists or is invalid")
+                else:
+                    st.warning("Please enter a command pattern")
+        
+        # Bulk edit
+        with st.expander("📝 Bulk Edit Allowed Commands"):
+            st.write("Edit all allowed commands at once (one per line):")
+            bulk_allowed = st.text_area(
+                "Allowed Commands",
+                value="\n".join(allowed_commands),
+                height=200,
+                key="bulk_allowed_commands",
+                help="Enter one command pattern per line"
+            )
+            if st.button("💾 Save Allowed Commands", key="save_allowed_bulk"):
+                commands_list = [cmd.strip() for cmd in bulk_allowed.split("\n") if cmd.strip()]
+                if command_list_manager.set_allowed_commands(commands_list):
+                    st.success(f"Saved {len(commands_list)} allowed commands")
+                    st.rerun()
+                else:
+                    st.error("Failed to save allowed commands")
+    
+    with tab2:
+        st.write("**Not-Allowed Commands List**")
+        st.caption("Commands that are explicitly forbidden. These take precedence over allowed commands.")
+        st.info("💡 **Tip:** Use `*` at the end of a pattern to match any suffix. Example: `kubectl delete*` blocks all delete commands.")
+        
+        # Get current not-allowed commands
+        not_allowed_commands = command_list_manager.get_not_allowed_commands()
+        
+        # Display current commands
+        if not_allowed_commands:
+            st.write(f"**Current Not-Allowed Commands ({len(not_allowed_commands)}):**")
+            for i, cmd in enumerate(not_allowed_commands, 1):
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.code(cmd, language="bash")
+                with col2:
+                    if st.button("🗑️", key=f"remove_not_allowed_{i}", help="Remove this command"):
+                        if command_list_manager.remove_not_allowed_command(cmd):
+                            st.success(f"Removed: {cmd}")
+                            st.rerun()
+                        else:
+                            st.error("Failed to remove command")
+        else:
+            st.info("No not-allowed commands configured")
+        
+        st.divider()
+        
+        # Add new not-allowed command
+        st.write("**Add New Not-Allowed Command**")
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            new_not_allowed = st.text_input(
+                "Command Pattern",
+                placeholder="e.g., kubectl delete*",
+                key="new_not_allowed_command",
+                help="Enter a command pattern to block. Use * at the end for wildcard matching (e.g., 'kubectl delete*' blocks all delete commands)"
+            )
+        with col2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            if st.button("➕ Add", key="add_not_allowed_btn", type="primary"):
+                if new_not_allowed.strip():
+                    if command_list_manager.add_not_allowed_command(new_not_allowed):
+                        st.success(f"Added: {new_not_allowed}")
+                        st.rerun()
+                    else:
+                        st.warning("Command already exists or is invalid")
+                else:
+                    st.warning("Please enter a command pattern")
+        
+        # Bulk edit
+        with st.expander("📝 Bulk Edit Not-Allowed Commands"):
+            st.write("Edit all not-allowed commands at once (one per line):")
+            bulk_not_allowed = st.text_area(
+                "Not-Allowed Commands",
+                value="\n".join(not_allowed_commands),
+                height=200,
+                key="bulk_not_allowed_commands",
+                help="Enter one command pattern per line"
+            )
+            if st.button("💾 Save Not-Allowed Commands", key="save_not_allowed_bulk"):
+                commands_list = [cmd.strip() for cmd in bulk_not_allowed.split("\n") if cmd.strip()]
+                if command_list_manager.set_not_allowed_commands(commands_list):
+                    st.success(f"Saved {len(commands_list)} not-allowed commands")
+                    st.rerun()
+                else:
+                    st.error("Failed to save not-allowed commands")
+    
+    st.divider()
+    
+    # Command Testing
+    st.subheader("🧪 Test Command")
+    st.write("Test if a command would be allowed or blocked:")
+    st.caption("💡 **Wildcard Support:** Patterns ending with `*` match any suffix. Example: `kubectl config use-context*` matches `kubectl config use-context kind-kind`")
+    
+    test_col1, test_col2 = st.columns([4, 1])
+    with test_col1:
+        test_command = st.text_input(
+            "Command to Test",
+            placeholder="e.g., kubectl config use-context kind-kind",
+            key="test_command_input"
+        )
+    with test_col2:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        test_btn = st.button("🔍 Test", key="test_command_btn", type="primary")
+    
+    if test_btn and test_command:
+        status = command_list_manager.get_command_status(test_command)
+        if status == "allowed":
+            st.success(f"✅ Command is ALLOWED: `{test_command}`\n\nThis command is in the allowed list and will execute directly.")
+        elif status == "blocked":
+            st.error(f"🚫 Command is BLOCKED: `{test_command}`\n\nThis command is in the not-allowed list and will be rejected without approval.")
+        elif status == "needs_approval":
+            st.warning(f"⚠️ Command NEEDS APPROVAL: `{test_command}`\n\nThis command is not in either list and will require human approval before execution.")
+    
+    # Configuration summary
+    st.divider()
+    summary = command_list_manager.get_config_summary()
+    st.caption(f"**Configuration Summary:** {summary['allowed_count']} allowed, {summary['not_allowed_count']} not-allowed | Config file: `{summary['config_path']}`")
 
 def show_monitoring_status():
     """Display monitoring status page"""
@@ -684,25 +971,455 @@ def show_monitoring_status():
         if st.button("Start Webhook Server"):
             st.success("Webhook server started!")
     
-    # System commands
-    st.subheader("💻 Allowed Commands")
+    # Command lists info
+    st.subheader("💻 Command Lists")
+    st.info("💡 Manage allowed and not-allowed command lists in the **Configuration** page.")
     
-    commands = [
-        "kubectl get pods",
-        "kubectl get services", 
-        "kubectl get nodes",
-        "aws ec2 describe-instances",
-        "gcloud compute instances list",
-        "az vm list"
-    ]
+    # Show current command list summary
+    summary = command_list_manager.get_config_summary()
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Allowed Commands", summary['allowed_count'])
+    with col2:
+        st.metric("Not-Allowed Commands", summary['not_allowed_count'])
     
-    for cmd in commands:
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.code(cmd)
-        with col2:
-            if st.button("Test", key=f"test_{cmd}"):
-                st.info(f"Testing: {cmd}")
+    if st.button("⚙️ Go to Configuration", use_container_width=True):
+        st.info("Navigate to the Configuration page to manage command lists")
+
+def show_chat_with_agent():
+    """Display chat interface with the agent"""
+    st.header("💬 Chat with Agent")
+    st.write("Ask the agent to run commands, perform fixes, or get help with infrastructure issues.")
+    
+    # Initialize chat history in session state
+    if 'chat_history' not in st.session_state:
+        st.session_state.chat_history = []
+    
+    if 'chat_incident_id' not in st.session_state:
+        st.session_state.chat_incident_id = None
+    
+    # Sidebar for chat options
+    with st.sidebar:
+        st.subheader("💬 Chat Options")
+        
+        # Link to incident if available
+        if st.session_state.chat_incident_id:
+            st.info(f"📋 Linked to Incident #{st.session_state.chat_incident_id}")
+            if st.button("🔗 Clear Link"):
+                st.session_state.chat_incident_id = None
+                st.rerun()
+        else:
+            incident_id_input = st.number_input(
+                "Link to Incident ID (optional)",
+                min_value=1,
+                value=None,
+                step=1,
+                key="link_incident_input"
+            )
+            if incident_id_input:
+                st.session_state.chat_incident_id = int(incident_id_input)
+        
+        st.divider()
+        
+        # Clear chat history
+        if st.button("🗑️ Clear Chat History", use_container_width=True):
+            st.session_state.chat_history = []
+            st.session_state.chat_incident_id = None
+            st.rerun()
+        
+        st.divider()
+        
+        # Quick actions
+        st.subheader("⚡ Quick Actions")
+        
+        if st.button("📊 Check Cluster Status", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'Check the Kubernetes cluster status',
+                'timestamp': datetime.now()
+            })
+            st.rerun()
+        
+        if st.button("🔍 List All Pods", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'List all pods in the cluster',
+                'timestamp': datetime.now()
+            })
+            st.rerun()
+        
+        if st.button("📈 Get System Health", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'Get overall system health status',
+                'timestamp': datetime.now()
+            })
+            st.rerun()
+    
+    # Display chat history
+    st.subheader("💭 Conversation")
+    
+    if not st.session_state.chat_history:
+        st.info("👋 Start a conversation! You can ask the agent to:\n"
+                "- Run commands (e.g., 'kubectl get pods')\n"
+                "- Perform fixes (e.g., 'fix the pod crash issue')\n"
+                "- Get help (e.g., 'what pods are failing?')\n"
+                "- Check infrastructure status")
+    else:
+        # Display chat messages
+        for idx, message in enumerate(st.session_state.chat_history):
+            if message['role'] == 'user':
+                with st.chat_message("user"):
+                    st.write(message['content'])
+                    if 'timestamp' in message:
+                        st.caption(f"🕐 {message['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                with st.chat_message("assistant"):
+                    st.write(message['content'])
+                    if 'timestamp' in message:
+                        st.caption(f"🕐 {message['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                    
+                    # Show command execution results if available
+                    if 'command_result' in message:
+                        result = message['command_result']
+                        if result is not None and isinstance(result, dict):
+                            with st.expander("📋 Command Execution Details"):
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.write(f"**Exit Code:** {result.get('exit_code', 'N/A')}")
+                                    st.write(f"**Success:** {'✅ Yes' if result.get('success') else '❌ No'}")
+                                with col2:
+                                    st.write(f"**Duration:** {result.get('duration_ms', 0)}ms")
+                                
+                                if result.get('stdout'):
+                                    st.write("**Output:**")
+                                    st.code(result['stdout'], language='text')
+                                
+                                if result.get('stderr'):
+                                    st.write("**Error:**")
+                                    st.code(result['stderr'], language='text')
+                    
+                    # Show commands executed if available
+                    if 'commands_executed' in message:
+                        with st.expander("🔧 Commands Executed"):
+                            for cmd in message['commands_executed']:
+                                st.code(cmd, language='bash')
+    
+    # Chat input
+    st.divider()
+    
+    # Create two columns for input and send button
+    col1, col2 = st.columns([5, 1])
+    
+    with col1:
+        user_input = st.text_input(
+            "Type your message...",
+            key="chat_input",
+            placeholder="e.g., 'Check pod status' or 'Fix the failing deployment'",
+            label_visibility="collapsed"
+        )
+    
+    with col2:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        send_button = st.button("📤 Send", type="primary", use_container_width=True)
+    
+    # Process user input
+    if send_button and user_input.strip():
+        # Add user message to history
+        st.session_state.chat_history.append({
+            'role': 'user',
+            'content': user_input.strip(),
+            'timestamp': datetime.now()
+        })
+        
+        # Process the message
+        with st.spinner("🤖 Agent is thinking..."):
+            try:
+                response = process_chat_message(
+                    user_input.strip(),
+                    st.session_state.chat_history,
+                    st.session_state.chat_incident_id
+                )
+                
+                # Add agent response to history
+                st.session_state.chat_history.append({
+                    'role': 'assistant',
+                    'content': response['message'],
+                    'timestamp': datetime.now(),
+                    'command_result': response.get('command_result'),
+                    'commands_executed': response.get('commands_executed', [])
+                })
+                
+                # Log the conversation
+                log_chat_conversation(user_input.strip(), response['message'], st.session_state.chat_incident_id)
+                
+            except Exception as e:
+                error_msg = f"❌ Error: {str(e)}"
+                st.session_state.chat_history.append({
+                    'role': 'assistant',
+                    'content': error_msg,
+                    'timestamp': datetime.now()
+                })
+                logger.error(f"Error in chat: {str(e)}")
+        
+        st.rerun()
+
+def process_chat_message(user_message: str, chat_history: List[Dict], incident_id: Optional[int] = None) -> Dict:
+    """
+    Process a chat message and generate a response
+    
+    Returns:
+        dict with 'message', 'command_result' (optional), 'commands_executed' (optional)
+    """
+    from app.llm.llm_service import LLMService
+    from app.monitoring.command_executor import CommandExecutor
+    from app.services.auto_fix_service import AutoFixService
+    
+    llm_service = LLMService()
+    command_executor = CommandExecutor()
+    
+    # Detect intent
+    message_lower = user_message.lower()
+    
+    # Check if it's a direct command request
+    if any(keyword in message_lower for keyword in ['run', 'execute', 'run command', 'execute command']):
+        # Extract command from message
+        # Try to find command patterns
+        import re
+        command_patterns = [
+            r'run\s+(?:command\s+)?["\']?([^"\']+)["\']?',
+            r'execute\s+(?:command\s+)?["\']?([^"\']+)["\']?',
+            r'["\']([^"\']+)["\']',
+        ]
+        
+        command = None
+        for pattern in command_patterns:
+            match = re.search(pattern, user_message, re.IGNORECASE)
+            if match:
+                command = match.group(1).strip()
+                break
+        
+        # If no pattern found, try to extract after keywords
+        if not command:
+            for keyword in ['run', 'execute']:
+                if keyword in message_lower:
+                    parts = user_message.split(keyword, 1)
+                    if len(parts) > 1:
+                        command = parts[1].strip()
+                        # Remove quotes if present
+                        command = command.strip('"\'')
+                        break
+        
+        if command:
+            # Execute the command
+            result = command_executor.execute_command(command, log_execution=True)
+            
+            if result.success:
+                response_msg = f"✅ Command executed successfully!\n\n**Command:** `{command}`\n\n**Output:**\n```\n{result.stdout}\n```"
+            else:
+                response_msg = f"❌ Command failed with exit code {result.exit_code}\n\n**Command:** `{command}`\n\n**Error:**\n```\n{result.stderr}\n```"
+            
+            return {
+                'message': response_msg,
+                'command_result': {
+                    'command': command,
+                    'exit_code': result.exit_code,
+                    'stdout': result.stdout,
+                    'stderr': result.stderr,
+                    'success': result.success,
+                    'duration_ms': result.duration_ms
+                },
+                'commands_executed': [command]
+            }
+        else:
+            return {
+                'message': "I couldn't extract a command from your message. Please specify the command clearly, e.g., 'run kubectl get pods'"
+            }
+    
+    # Check if it's a fix request
+    elif any(keyword in message_lower for keyword in ['fix', 'resolve', 'repair', 'troubleshoot']):
+        if incident_id:
+            # Try to fix the linked incident
+            try:
+                with db_service.get_session() as session:
+                    incident = session.query(Incident).filter(Incident.id == incident_id).first()
+                    if incident:
+                        auto_fix_service = AutoFixService()
+                        success = auto_fix_service.attempt_auto_fix(incident, force_retry=True, user_input=user_message)
+                        
+                        if success:
+                            return {
+                                'message': f"✅ Successfully fixed incident #{incident_id}! The issue has been resolved.",
+                                'commands_executed': []
+                            }
+                        else:
+                            return {
+                                'message': f"⚠️ Attempted to fix incident #{incident_id}, but the fix may not have been successful. Check the incident details for more information.",
+                                'commands_executed': []
+                            }
+                    else:
+                        return {
+                            'message': f"❌ Incident #{incident_id} not found. Please link to a valid incident first."
+                        }
+            except Exception as e:
+                return {
+                    'message': f"❌ Error attempting fix: {str(e)}"
+                }
+        else:
+            return {
+                'message': "To perform a fix, please either:\n1. Link to an incident using the sidebar, or\n2. Describe the issue and I'll help you troubleshoot it."
+            }
+    
+    # Check if it's a status/query request
+    elif any(keyword in message_lower for keyword in ['status', 'check', 'list', 'get', 'show', 'what', 'how']):
+        # Use LLM to generate appropriate commands and execute them
+        context = f"User wants to: {user_message}\n\n"
+        context += "Available commands I can run:\n"
+        context += "- kubectl get pods\n"
+        context += "- kubectl get nodes\n"
+        context += "- kubectl get services\n"
+        context += "- kubectl cluster-info\n"
+        context += "- kubectl get events\n"
+        
+        # Build conversation context
+        conversation_context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+            for msg in chat_history[-5:]  # Last 5 messages for context
+        ])
+        
+        prompt = f"""You are a DevOps assistant. The user is asking: {user_message}
+
+Previous conversation:
+{conversation_context}
+
+Based on the user's request, determine what command(s) should be executed. 
+Respond in JSON format with:
+{{
+    "commands": ["command1", "command2"],
+    "explanation": "brief explanation of what will be done"
+}}
+
+Only suggest commands that are safe and appropriate for monitoring/checking status.
+Do not suggest destructive commands like delete, apply, create unless explicitly requested.
+"""
+        
+        try:
+            # Use the chat method
+            messages = llm_service.start_conversation()
+            # Add conversation history
+            for msg in chat_history[-5:]:
+                if msg['role'] == 'user':
+                    messages.append({"role": "user", "content": msg['content']})
+                else:
+                    messages.append({"role": "assistant", "content": msg['content']})
+            
+            # Get response
+            response = llm_service.chat(messages, user_message, incident_id=None)
+            
+            # Extract commands from response
+            commands = response.get('commands', [])
+            explanation = response.get('explanation', response.get('solution', ''))
+            
+            if commands:
+                executed_commands = []
+                results = []
+                
+                for cmd in commands:
+                    result = command_executor.execute_command(cmd, log_execution=True)
+                    executed_commands.append(cmd)
+                    results.append({
+                        'command': cmd,
+                        'success': result.success,
+                        'output': result.stdout if result.success else result.stderr
+                    })
+                
+                # Build response
+                response_parts = [explanation + "\n\n"]
+                for res in results:
+                    if res['success']:
+                        response_parts.append(f"✅ **{res['command']}:**\n```\n{res['output']}\n```\n")
+                    else:
+                        response_parts.append(f"❌ **{res['command']}:**\n```\n{res['output']}\n```\n")
+                
+                return {
+                    'message': "\n".join(response_parts),
+                    'commands_executed': executed_commands
+                }
+            else:
+                return {
+                    'message': explanation or response.get('raw_response', 'No response')
+                }
+        except Exception as e:
+            return {
+                'message': f"❌ Error processing request: {str(e)}"
+            }
+    
+    # General conversation - use LLM
+    else:
+        # Build conversation context
+        conversation_context = "\n".join([
+            f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+            for msg in chat_history[-10:]  # Last 10 messages for context
+        ])
+        
+        system_prompt = """You are a helpful DevOps assistant. You can help users with:
+- Running infrastructure commands (kubectl, aws, gcloud, az)
+- Troubleshooting issues
+- Checking system status
+- Providing guidance on infrastructure management
+
+Be concise and helpful. If the user wants to run a command, suggest it clearly.
+If they want to fix something, guide them or ask if they want to link to an incident."""
+        
+        prompt = f"""{system_prompt}
+
+Conversation history:
+{conversation_context}
+
+User: {user_message}
+Assistant:"""
+        
+        try:
+            # Use the chat method for general conversation
+            messages = llm_service.start_conversation()
+            # Add conversation history
+            for msg in chat_history[-10:]:
+                if msg['role'] == 'user':
+                    messages.append({"role": "user", "content": msg['content']})
+                else:
+                    messages.append({"role": "assistant", "content": msg['content']})
+            
+            # Get response
+            response = llm_service.chat(messages, user_message, incident_id=None)
+            llm_response = response.get('raw_response', response.get('explanation', response.get('solution', 'No response')))
+            
+            return {
+                'message': llm_response
+            }
+        except Exception as e:
+            return {
+                'message': f"❌ Error: {str(e)}"
+            }
+
+def log_chat_conversation(user_message: str, agent_response: str, incident_id: Optional[int] = None):
+    """Log chat conversation to audit log"""
+    try:
+        with db_service.get_session() as session:
+            audit_log = AuditLog(
+                action_type=ActionType.LLM_QUERY,
+                action_description=f"Chat conversation: {user_message[:100]}",
+                llm_prompt=user_message,
+                llm_response=agent_response,
+                success=True,
+                user_id="ui_user",
+                source_system="chat_interface",
+                incident_id=incident_id
+            )
+            session.add(audit_log)
+            session.commit()
+    except Exception as e:
+        logger.error(f"Failed to log chat conversation: {str(e)}")
 
 if __name__ == "__main__":
     main()

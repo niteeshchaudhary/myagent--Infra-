@@ -1,0 +1,39 @@
+{
+  "allowed_commands": [
+    "kubectl get pods",
+    "kubectl get services",
+    "kubectl get nodes",
+    "kubectl config view",
+    "kubectl cluster-info",
+    "kubectl describe pod",
+    "kubectl describe service",
+    "kubectl describe node",
+    "kubectl get events",
+    "kubectl logs",
+    "aws ec2 describe-instances",
+    "aws ec2 describe-instance-status",
+    "gcloud compute instances list",
+    "gcloud compute instances describe",
+    "az vm list",
+    "az vm show",
+    "kubectl config current-context",
+    "kubectl config get-contexts",
+    "cat /etc/resolv.conf",
+    "kubectl version --client",
+    "kubectl config get-clusters",
+    "minikube stop",
+    "minikube delete",
+    "minikube start",
+    "minikube status",
+    "minikube *",
+    "kubectl config use-context*"
+  ],
+  "not_allowed_commands": [
+    "kubectl delete",
+    "kubectl apply",
+    "kubectl create",
+    "rm -rf",
+    "format",
+    "dd if="
+  ]
+}
