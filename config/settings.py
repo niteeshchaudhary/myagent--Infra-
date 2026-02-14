@@ -45,9 +45,10 @@ class Settings(BaseSettings):
     QUEUE_PERSISTENCE_PATH: str = "data/queue_state.json"
     
     # LLM Configuration
-    LLM_PROVIDER: str = "ollama"  # ollama, openai, groq
+    LLM_PROVIDER: str = "ollama"  # ollama, openai, groq, anthropic
     OPENAI_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
+    ANTHROPIC_API_KEY: Optional[str] = None
     OLLAMA_HOST: str = "http://localhost:11434"
     DEFAULT_MODEL: str = "llama2"
     
