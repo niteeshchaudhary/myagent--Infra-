@@ -1167,17 +1167,25 @@ def show_chat_with_agent():
 
 def process_chat_message(user_message: str, chat_history: List[Dict], incident_id: Optional[int] = None) -> Dict:
     """
-    Process a chat message and generate a response
+    Process a chat message and generate a response with intelligent issue detection
     
     Returns:
-        dict with 'message', 'command_result' (optional), 'commands_executed' (optional)
+        dict with 'message', 'command_result' (optional), 'commands_executed' (optional), 'similar_issues' (optional)
     """
     from app.llm.llm_service import LLMService
     from app.monitoring.command_executor import CommandExecutor
     from app.services.auto_fix_service import AutoFixService
+    from app.services.similarity_service import similarity_service
     
     llm_service = LLMService()
     command_executor = CommandExecutor()
+    
+    # Check if LLM is available
+    if not llm_service.is_available():
+        return {
+            'message': f"⚠️ LLM service is not available. Please configure {llm_service.provider.upper()} API key in settings.",
+            'commands_executed': []
+        }
     
     # Detect intent
     message_lower = user_message.lower()
