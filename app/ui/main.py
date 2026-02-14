@@ -1275,8 +1275,117 @@ def process_chat_message(user_message: str, chat_history: List[Dict], incident_i
                     'message': f"❌ Error attempting fix: {str(e)}"
                 }
         else:
+            # User described an issue but no incident linked - search for similar issues
+            if similarity_service.is_available():
+                similar_issues = similarity_service.find_similar_incidents(
+                    user_message,
+                    top_k=5,
+                    min_similarity=0.4
+                )
+                
+                if similar_issues:
+                    response_parts = [
+                        "🔍 **I found similar issues in the system:**\n"
+                    ]
+                    
+                    for i, issue in enumerate(similar_issues, 1):
+                        status_emoji = "✅" if issue['auto_fix_successful'] else "⚠️"
+                        similarity_pct = issue['similarity_score'] * 100
+                        
+                        response_parts.append(
+                            f"\n**{i}. {status_emoji} Incident #{issue['incident_id']}** (Similarity: {similarity_pct:.0f}%)\n"
+                            f"   **Title:** {issue['title']}\n"
+                            f"   **Status:** {issue['status']} | **Severity:** {issue['severity']}\n"
+                            f"   **Source:** {issue['source_system'] or 'Unknown'}\n"
+                        )
+                        
+                        if issue.get('error_message'):
+                            response_parts.append(f"   **Error:** {issue['error_message']}\n")
+                        
+                        if issue['auto_fix_successful']:
+                            response_parts.append(f"   ✅ This issue was auto-fixed successfully\n")
+                    
+                    response_parts.append(
+                        "\n💡 **What would you like to do?**\n"
+                        "- Link to one of these incidents to apply the same fix\n"
+                        "- Describe your issue in more detail\n"
+                        "- Ask me to create a new incident and attempt a fix"
+                    )
+                    
+                    return {
+                        'message': "".join(response_parts),
+                        'similar_issues': similar_issues
+                    }
+            
+            # No similar issues found or similarity service not available
             return {
-                'message': "To perform a fix, please either:\n1. Link to an incident using the sidebar, or\n2. Describe the issue and I'll help you troubleshoot it."
+                'message': "To perform a fix, please either:\n1. Link to an incident using the sidebar, or\n2. Describe the issue in more detail and I'll search for similar problems\n3. Create a new incident if this is a new issue"
+            }
+    
+    # Check if user is describing a problem/issue (auto-detect intent)
+    elif any(keyword in message_lower for keyword in ['issue', 'problem', 'error', 'failing', 'down', 'crash', 'not working', 'broken']):
+        # Intelligent issue detection with similar issues
+        if similarity_service.is_available():
+            similar_issues = similarity_service.find_similar_incidents(
+                user_message,
+                top_k=5,
+                min_similarity=0.3,
+                exclude_resolved=False
+            )
+            
+            if similar_issues:
+                response_parts = [
+                    "🤖 **I understand you're experiencing an issue. Let me help!**\n",
+                    f"\n📊 **Found {len(similar_issues)} similar incident(s) in our system:**\n"
+                ]
+                
+                for i, issue in enumerate(similar_issues, 1):
+                    status_emoji = "✅" if issue['status'] == 'resolved' else "🔴" if issue['status'] == 'open' else "🟡"
+                    similarity_pct = issue['similarity_score'] * 100
+                    fix_status = "✅ Auto-Fixed" if issue['auto_fix_successful'] else "⚠️ Needs Attention"
+                    
+                    response_parts.append(
+                        f"\n**{i}. {status_emoji} Incident #{issue['incident_id']}** (Match: {similarity_pct:.0f}%)\n"
+                        f"   **Title:** {issue['title']}\n"
+                        f"   **Status:** {issue['status'].title()} | **Severity:** {issue['severity'].title()}\n"
+                        f"   **Fix Status:** {fix_status}\n"
+                    )
+                    
+                    if issue['affected_service']:
+                        response_parts.append(f"   **Service:** {issue['affected_service']}\n")
+                
+                response_parts.append(
+                    "\n💡 **Recommendations:**\n"
+                    "1. Link to the most similar incident (sidebar) and I can try the same fix\n"
+                    "2. Review the resolution steps from successful fixes\n"
+                    "3. Provide more details for a custom solution\n"
+                )
+                
+                return {
+                    'message': "".join(response_parts),
+                    'similar_issues': similar_issues
+                }
+            else:
+                return {
+                    'message': (
+                        "🤖 **I understand you're having an issue, but I couldn't find similar incidents.**\n\n"
+                        "📝 **To help you better, please provide:**\n"
+                        "- What component/service is affected?\n"
+                        "- What error messages are you seeing?\n"
+                        "- When did this start?\n\n"
+                        "Or you can:\n"
+                        "- Link to an existing incident\n"
+                        "- Run diagnostic commands (e.g., 'check pod status')\n"
+                    )
+                }
+        else:
+            return {
+                'message': (
+                    "🤖 **I understand you're having an issue.**\n\n"
+                    "⚠️ Similarity search is not available. Please:\n"
+                    "- Link to an existing incident, or\n"
+                    "- Describe the issue in detail and I'll help troubleshoot\n"
+                )
             }
     
     # Check if it's a status/query request
